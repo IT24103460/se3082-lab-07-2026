@@ -1,0 +1,80 @@
+# Lab 07 – Exercise 7: Summary Comparison
+
+All six programs sum the integers 1 to 1,000,000 and every run produced the
+correct total of 500,000,500,000.
+
+## Comparison of the six programs
+
+| Program | Collectives used | Memory per process | Manual sum loop on root? | Where the result is available |
+| ex1.c (Bcast) | MPI_Bcast + MPI_Send/MPI_Recv | Full array (N) on every process | Yes (Recv loop, O(P)) | Root only |
+| ex2.c (Scatter) | MPI_Scatter + MPI_Send/MPI_Recv | Root: N, others: N/P chunk | Yes (Recv loop, O(P)) | Root only |
+| ex3.c (Gather) | MPI_Scatter, MPI_Gather | Root: N, others: N/P chunk | Yes (loop over all_sums) | Root only |
+| ex4.c (Reduce) | MPI_Scatter, MPI_Reduce | Root: N, others: N/P chunk | No | Root only |
+| ex5.c (Allreduce) | MPI_Scatter, MPI_Allreduce | Root: N, others: N/P chunk | No | All processes (same value) |
+| ex6.c (Scan) | MPI_Scatter, MPI_Scan | Root: N, others: N/P chunk | No | Different on each rank (last rank = total) |
+
+## Execution times (seconds)
+
+Measured on a laptop under WSL (Ubuntu) with OpenMPI, one run each.
+
+| Program | np = 2 | np = 4 | np = 8 |
+|---|---|---|---|
+| ex1 (Bcast) | 0.0070 | 0.0172 | 0.0118 |
+| ex2 (Scatter) | 0.0070 | **0.0056** | 0.0054 |
+| ex3 (Gather) | 0.0087 | 0.0061 | 0.0048 |
+| ex4 (Reduce) | 0.0095 | 0.0062 | **0.0040** |
+| ex5 (Allreduce) | 0.0078 | 0.0071 | 0.0046 |
+| ex6 (Scan) | 0.0174 | 0.0148 | 0.0135 |
+
+## Which approach is fastest and why
+
+With 2 processes, Bcast and Scatter took the same time (0.0070 s). With only one
+non-root process there is little difference between sending it the whole array
+and sending it half, so the programs are close and run-to-run noise decides the
+order.
+
+With 4 and 8 processes the Bcast version was clearly the slowest of the
+reduction-style programs, about 2–3 times slower than the scatter-based ones
+(0.0172 s vs 0.0056 s at np = 4, and 0.0118 s vs 0.0040 s at np = 8). MPI_Bcast
+copies the full 1,000,000-element array (about 4 MB) to every process even
+though each one only uses N/P of it, so the amount of data moved grows with the
+number of processes. MPI_Scatter sends each process only its own chunk, so the
+total data moved stays at about N elements regardless of P.
+
+Among the scatter-based versions (ex2–ex5) the times were very close, because
+scattering the array dominates the runtime and the collection step moves only
+one long long per process. The fastest overall result was Reduce at np = 8
+(0.0040 s). Reduce and Allreduce combine values with a tree / recursive-doubling
+algorithm in O(log P) steps instead of root receiving P−1 messages one by one,
+which starts to help as P grows. With at most 8 processes on one machine that
+difference is only fractions of a millisecond, so the ordering between ex2–ex5
+is within measurement noise; the advantage would be much clearer with many more
+processes spread across a network.
+
+Scan (ex6) was consistently the slowest (0.0135–0.0174 s). Its time is measured
+on the last rank, whose result depends on the partial sums of every rank before
+it, so it is the process that waits longest for the prefix computation to
+complete. Scan also does more work than Reduce, since it produces a different
+partial result for every rank rather than a single total.
+
+These are single runs on a laptop, where other programs and WSL scheduling add
+noise (for example, Bcast at np = 8 was faster than at np = 4). Repeating each
+run several times and taking the average would give more reliable numbers, but
+the main pattern, Bcast being slowest at higher process counts, is clear.
+
+## Thinking question: when would you choose MPI_Scan over MPI_Allreduce?
+
+Use MPI_Scan when each process needs a result that depends on the processes
+*before* it, rather than one global value. Allreduce gives every process the
+same total; Scan gives each rank its own running total, which works as that
+rank's global offset.
+
+Concrete example: parallel filtering into one shared output. Each process goes
+through its chunk and keeps only the elements that meet a condition (for
+example, values above a threshold), so each process ends up with a different
+number of results. To write all results into one output array or file (e.g. with
+MPI_File_write_at) without gaps or overlaps, each process needs to know where
+its results start. It calls MPI_Scan on its local count, and
+prefix − local_count is exactly its starting index in the global output.
+Allreduce would only tell every process the total count, which is not enough to
+place the data. (MPI_Exscan returns this exclusive prefix directly.)
